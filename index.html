@@ -97,30 +97,33 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #000; colo
 #app {
   display: none; width: 100vw; height: 100vh;
   position: relative; overflow: hidden;
+  background: #000;
 }
 
-/* Live camera — full screen, user visible */
+/* Live camera — full screen, user fully visible */
 #vid {
   position: absolute; inset: 0;
   width: 100%; height: 100%;
   object-fit: cover;
   transform: scaleX(-1);
-  /* Desaturated so the UI overlay reads cleanly, but still fully visible */
+  z-index: 0;
   filter: none;
+  opacity: 1;
   transition: opacity .4s;
 }
 #vid.off { opacity: 0; }
 
-/* Dark vignette to keep edges readable */
+/* Vignette — very subtle, does NOT dim the centre where user stands */
 #vignette {
   position: absolute; inset: 0; z-index: 1; pointer-events: none;
-  background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,.3) 100%);
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.22) 100%);
 }
 
-/* Trail canvas — hand trails */
+/* Trail canvas — transparent background, hand trails only */
 #trailCvs {
   position: absolute; inset: 0; width: 100%; height: 100%;
   pointer-events: none; transform: scaleX(-1); z-index: 2;
+  background: transparent;
 }
 
 /* ── TOP BAR ── */
@@ -407,6 +410,12 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #000; colo
   <!-- Top bar -->
   <div id="topBar">
     <div class="t-brand">AR Theremin <span>by Rajat</span></div>
+    <div class="scale-group">
+      <span class="scale-label">Scale</span>
+      <button class="scale-btn" id="sc-chromatic" onclick="setScale('chromatic')">Chromatic</button>
+      <button class="scale-btn active" id="sc-major" onclick="setScale('major')">Major</button>
+      <button class="scale-btn" id="sc-minor" onclick="setScale('minor')">Minor</button>
+    </div>
     <div class="t-btns">
       <button class="tbtn" id="camBtn" onclick="toggleVideo()">
         <span class="ldot" id="lDot"></span><span id="camLbl">Camera</span>
@@ -528,12 +537,6 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #000; colo
   <!-- Bottom bar -->
   <div id="bottomBar">
     <div id="waveWrap"><canvas id="waveCanvas"></canvas></div>
-    <div class="scale-group">
-      <span class="scale-label">Scale</span>
-      <button class="scale-btn" id="sc-chromatic" onclick="setScale('chromatic')">Chromatic</button>
-      <button class="scale-btn active" id="sc-major" onclick="setScale('major')">Major</button>
-      <button class="scale-btn" id="sc-minor" onclick="setScale('minor')">Minor</button>
-    </div>
     <div class="hand-status">
       <div class="hs-item" id="hsVol">
         <div class="hs-dot"></div><span id="hsVolLbl">Vol hand</span>
@@ -765,11 +768,13 @@ function onHands(R) {
 
   volPos = null; pitchPos = null;
 
-  // Fade trail canvas gently
+  // Fade trail — use globalCompositeOperation so it fades to transparent, not black
   const tCvs = document.getElementById('trailCvs');
   const tCtx = tCvs.getContext('2d');
-  tCtx.fillStyle = 'rgba(0,0,0,.08)';
+  tCtx.globalCompositeOperation = 'destination-out';
+  tCtx.fillStyle = 'rgba(0,0,0,0.15)';
   tCtx.fillRect(0, 0, tCvs.width, tCvs.height);
+  tCtx.globalCompositeOperation = 'source-over';
 
   R.multiHandLandmarks.forEach((lms, i) => {
     const label = R.multiHandedness[i].label;
