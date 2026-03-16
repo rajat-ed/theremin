@@ -564,221 +564,296 @@ function xToFreq(xNorm) {
 // ── AUDIO ENGINE ─────────────────────────────────────
 let AC, masterGain, analyser;
 let currentVoice = 'theremin';
-let targetFreq = 220, smoothFreq = 220;
-let targetVol  = 0,   smoothVol  = 0;
+let targetFreq = 220;
+let targetVol  = 0, smoothVol = 0;
 let isMuted = false;
-
-// Each voice is a self-contained object with start()/stop()/setFreq(f)/setGain(g)
 let voice = null;
+let reverbNode=null, reverbSend=null, reverbReturn=null;
 
-async function makeReverb(duration=1.8, decay=2.0) {
+// Shared white-noise buffer (reused by flute)
+let noiseBuffer = null;
+function getNoiseBuffer() {
+  if (noiseBuffer) return noiseBuffer;
+  const len = AC.sampleRate * 3;
+  noiseBuffer = AC.createBuffer(1, len, AC.sampleRate);
+  const d = noiseBuffer.getChannelData(0);
+  for (let i=0;i<len;i++) d[i] = Math.random()*2-1;
+  return noiseBuffer;
+}
+
+async function makeReverb(duration=2.0, decay=2.2) {
   const len = AC.sampleRate * duration;
   const buf = AC.createBuffer(2, len, AC.sampleRate);
-  for (let ch=0; ch<2; ch++) {
-    const d = buf.getChannelData(ch);
-    for (let i=0; i<len; i++) d[i] = (Math.random()*2-1) * Math.pow(1-i/len, decay);
+  for (let ch=0;ch<2;ch++) {
+    const d=buf.getChannelData(ch);
+    for (let i=0;i<len;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/len,decay);
   }
-  const c = AC.createConvolver(); c.buffer = buf; return c;
+  const c=AC.createConvolver(); c.buffer=buf; return c;
 }
 
-// ─── VOICE: THEREMIN ───────────────────────────────
-// Classic sine-based theremin — 3 detuned sines, gentle vibrato, LP filter
+// ─── VOICE 1: THEREMIN ────────────────────────────────
+// Spec: sine oscillator, LFO vibrato at 6Hz depth 8,
+//       exponentialRampToValueAtTime glide over 0.1s
 function buildTheremin() {
-  const dry = AC.createGain(); dry.gain.value = 1;
-  const osc1 = AC.createOscillator();
-  const osc2 = AC.createOscillator();
-  const osc3 = AC.createOscillator();
-  const g1 = AC.createGain(), g2 = AC.createGain(), g3 = AC.createGain();
-  const lp  = AC.createBiquadFilter();
-  const vib = AC.createOscillator();
-  const vg  = AC.createGain();
+  const output = AC.createGain(); output.gain.value = 1;
 
-  osc1.type='sine'; osc2.type='sine'; osc3.type='triangle';
-  osc1.frequency.value=220; osc2.frequency.value=223; osc3.frequency.value=217;
-  g1.gain.value=0.72; g2.gain.value=0.16; g3.gain.value=0.12;
-
-  vib.type='sine'; vib.frequency.value=5.0;
-  vg.gain.value=3.2;
-  vib.connect(vg);
-  vg.connect(osc1.frequency); vg.connect(osc2.frequency); vg.connect(osc3.frequency);
-
-  lp.type='lowpass'; lp.frequency.value=2400; lp.Q.value=0.6;
-
-  osc1.connect(g1); osc2.connect(g2); osc3.connect(g3);
-  g1.connect(lp); g2.connect(lp); g3.connect(lp);
-  lp.connect(dry);
-
-  osc1.start(); osc2.start(); osc3.start(); vib.start();
-
-  return {
-    output: dry,
-    setFreq(f) {
-      const t = AC.currentTime;
-      osc1.frequency.setTargetAtTime(f,   t, 0.015);
-      osc2.frequency.setTargetAtTime(f+4, t, 0.015);
-      osc3.frequency.setTargetAtTime(f-3, t, 0.015);
-    },
-    stop() { [osc1,osc2,osc3,vib].forEach(o=>{try{o.stop();}catch(e){}}) }
-  };
-}
-
-// ─── VOICE: CONTINUUM FINGERBOARD ──────────────────
-// Continuous pitch controller sound — sawtooth through formant filters
-// Warm, expressive, synthesiser-like
-function buildContinuum() {
-  const out = AC.createGain(); out.gain.value = 1;
+  // Main oscillator
   const osc = AC.createOscillator();
-  const osc2 = AC.createOscillator();
-  const g1 = AC.createGain(), g2 = AC.createGain();
+  osc.type = 'sine';
+  osc.frequency.value = 220;
 
-  // Formant filters to give vocal/continuum character
-  const f1 = AC.createBiquadFilter(); f1.type='peaking'; f1.frequency.value=700;  f1.Q.value=4; f1.gain.value=8;
-  const f2 = AC.createBiquadFilter(); f2.type='peaking'; f2.frequency.value=1200; f2.Q.value=3; f2.gain.value=5;
-  const f3 = AC.createBiquadFilter(); f3.type='lowpass'; f3.frequency.value=3000; f3.Q.value=0.5;
+  // LFO vibrato — exactly as spec: 6Hz, depth 8
+  const vibrato     = AC.createOscillator();
+  const vibratoGain = AC.createGain();
+  vibrato.type            = 'sine';
+  vibrato.frequency.value = 6;
+  vibratoGain.gain.value  = 8;
+  vibrato.connect(vibratoGain);
+  vibratoGain.connect(osc.frequency); // modulates pitch
 
-  // Mild chorus
-  const delay = AC.createDelay(0.03);
-  const delayMod = AC.createOscillator();
-  const delayModG = AC.createGain();
-  delayMod.frequency.value = 0.8; delayMod.type='sine';
-  delayModG.gain.value = 0.008;
-  delayMod.connect(delayModG); delayModG.connect(delay.delayTime);
+  // Gentle LP to smooth any harshness
+  const lp = AC.createBiquadFilter();
+  lp.type           = 'lowpass';
+  lp.frequency.value = 2800;
+  lp.Q.value         = 0.5;
 
-  osc.type='sawtooth';  osc.frequency.value=220;
-  osc2.type='sawtooth'; osc2.frequency.value=220.5;
-  g1.gain.value=0.55; g2.gain.value=0.45;
+  osc.connect(lp);
+  lp.connect(output);
 
-  osc.connect(g1); osc2.connect(g2);
-  g1.connect(f1); g2.connect(delay);
-  delay.connect(f1);
-  f1.connect(f2); f2.connect(f3); f3.connect(out);
+  osc.start(); vibrato.start();
 
-  osc.start(); osc2.start(); delayMod.start();
-
+  let lastFreq = 220;
   return {
-    output: out,
+    output,
     setFreq(f) {
+      if (Math.abs(f - lastFreq) < 0.01) return;
+      // Spec: exponentialRampToValueAtTime over 0.1s for smooth glide
       const t = AC.currentTime;
-      osc.frequency.setTargetAtTime(f,     t, 0.010);
-      osc2.frequency.setTargetAtTime(f+1,  t, 0.010);
-      // Sweep formants with pitch for vocal-like expression
-      f1.frequency.setTargetAtTime(f*3.2,  t, 0.05);
-      f2.frequency.setTargetAtTime(f*5.5,  t, 0.05);
+      osc.frequency.cancelScheduledValues(t);
+      osc.frequency.setValueAtTime(osc.frequency.value, t);
+      osc.frequency.exponentialRampToValueAtTime(Math.max(f, 1), t + 0.1);
+      lastFreq = f;
     },
-    stop() { [osc,osc2,delayMod].forEach(o=>{try{o.stop();}catch(e){}}) }
+    stop() { [osc, vibrato].forEach(o=>{try{o.stop();}catch(e){}}) }
   };
 }
 
-// ─── VOICE: FLUTE ──────────────────────────────────
-// Breathy flute — sine + noise breath layer + bandpass + vibrato
+// ─── VOICE 2: FLUTE ───────────────────────────────────
+// Spec: sine tone + white noise through bandpass at 2000Hz,
+//       ADSR: attack 50ms, decay 100ms, sustain 0.8, release 100ms,
+//       chiff on note start (brief square wave burst at 8000Hz for 20ms)
 function buildFlute() {
-  const out = AC.createGain(); out.gain.value = 1;
+  const output = AC.createGain(); output.gain.value = 1;
 
-  // Tone — sine wave
-  const toneOsc = AC.createOscillator();
-  const toneG   = AC.createGain();
-  toneOsc.type='sine'; toneOsc.frequency.value=440;
-  toneG.gain.value=0.65;
+  // ── Tone oscillator ──
+  const toneOsc  = AC.createOscillator();
+  const toneGain = AC.createGain();
+  toneOsc.type            = 'sine';
+  toneOsc.frequency.value = 440;
+  toneGain.gain.value     = 0; // starts silent, ADSR below applies
 
-  // Breath — filtered noise
-  const bufLen = AC.sampleRate * 2;
-  const nBuf   = AC.createBuffer(1, bufLen, AC.sampleRate);
-  const nd = nBuf.getChannelData(0);
-  for (let i=0; i<bufLen; i++) nd[i] = Math.random()*2-1;
-  const noise  = AC.createBufferSource();
-  noise.buffer = nBuf; noise.loop = true;
-  const noiseHP = AC.createBiquadFilter(); noiseHP.type='bandpass'; noiseHP.frequency.value=800; noiseHP.Q.value=1.5;
-  const noiseG  = AC.createGain(); noiseG.gain.value=0.06; // subtle breath
+  // ── Breath noise ──
+  const noise      = AC.createBufferSource();
+  noise.buffer     = getNoiseBuffer();
+  noise.loop       = true;
+  const breathBP   = AC.createBiquadFilter();
+  breathBP.type            = 'bandpass';
+  breathBP.frequency.value = 2000; // spec: bandpass ~2000Hz
+  breathBP.Q.value         = 1.2;
+  const breathGain = AC.createGain();
+  breathGain.gain.value = 0.08;
 
-  // Vibrato — slow, gentle
-  const vib = AC.createOscillator(); vib.type='sine'; vib.frequency.value=5.5;
-  const vibG = AC.createGain(); vibG.gain.value=2.5;
-  vib.connect(vibG); vibG.connect(toneOsc.frequency);
+  // ── LFO vibrato ──
+  const vib  = AC.createOscillator();
+  const vibG = AC.createGain();
+  vib.type            = 'sine';
+  vib.frequency.value = 5.5;
+  vibG.gain.value     = 3;
+  vib.connect(vibG);
+  vibG.connect(toneOsc.frequency);
 
-  // LP for warmth
-  const lp = AC.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=3500; lp.Q.value=0.4;
+  // ── LP warmth ──
+  const lp = AC.createBiquadFilter();
+  lp.type            = 'lowpass';
+  lp.frequency.value = 3500;
+  lp.Q.value         = 0.4;
 
-  toneOsc.connect(toneG);
-  noise.connect(noiseHP); noiseHP.connect(noiseG);
-  toneG.connect(lp); noiseG.connect(lp);
-  lp.connect(out);
+  // Signal routing
+  toneOsc.connect(toneGain);
+  noise.connect(breathBP);
+  breathBP.connect(breathGain);
+  toneGain.connect(lp);
+  breathGain.connect(lp);
+  lp.connect(output);
+
+  // ── ADSR envelope ─ applied to toneGain ──
+  // Spec: attack 50ms, decay 100ms, sustain 0.8, release 100ms
+  const now = AC.currentTime;
+  toneGain.gain.setValueAtTime(0, now);
+  toneGain.gain.linearRampToValueAtTime(1.0,  now + 0.050);  // attack  50ms
+  toneGain.gain.linearRampToValueAtTime(0.8,  now + 0.150);  // decay  100ms → sustain 0.8
+
+  // ── Chiff: brief square wave burst at 8000Hz for 20ms ──
+  // Spec: "simulate cheap chiff by briefly ramping a Square Wave at 8000Hz+ for 20ms"
+  const chiff     = AC.createOscillator();
+  const chiffGain = AC.createGain();
+  chiff.type            = 'square';
+  chiff.frequency.value = 8000;
+  chiffGain.gain.value  = 0;
+  chiff.connect(chiffGain);
+  chiffGain.connect(output);
+  chiff.start(now);
+  chiffGain.gain.setValueAtTime(0.12, now);
+  chiffGain.gain.linearRampToValueAtTime(0, now + 0.020); // 20ms burst
+  chiff.stop(now + 0.025);
 
   toneOsc.start(); noise.start(); vib.start();
 
+  let lastFreq = 440;
   return {
-    output: out,
+    output,
     setFreq(f) {
+      if (Math.abs(f - lastFreq) < 0.01) return;
       const t = AC.currentTime;
-      toneOsc.frequency.setTargetAtTime(f, t, 0.018);
-      noiseHP.frequency.setTargetAtTime(f*1.8, t, 0.018);
+      toneOsc.frequency.cancelScheduledValues(t);
+      toneOsc.frequency.setValueAtTime(toneOsc.frequency.value, t);
+      toneOsc.frequency.exponentialRampToValueAtTime(Math.max(f,1), t + 0.08);
+      // Spec: sweep bandpass with pitch
+      breathBP.frequency.setTargetAtTime(f * 1.8, t, 0.02);
+      lastFreq = f;
     },
-    stop() { [toneOsc,noise,vib].forEach(o=>{try{o.stop();}catch(e){}}) }
+    stop() {
+      // Release: fade toneGain over 100ms (spec release)
+      const t = AC.currentTime;
+      toneGain.gain.cancelScheduledValues(t);
+      toneGain.gain.setValueAtTime(toneGain.gain.value, t);
+      toneGain.gain.linearRampToValueAtTime(0, t + 0.1);
+      setTimeout(()=>{ [toneOsc,noise,vib].forEach(o=>{try{o.stop();}catch(e){}}); }, 120);
+    }
   };
 }
 
-// ─── VOICE: STRINGS ────────────────────────────────
-// Warm string section — sawtooth through multiple resonant bandpass filters
-// Slow attack envelope on amplitude, choir-like
+// ─── VOICE 3: STRINGS ─────────────────────────────────
+// Spec: 3× sawtooth, detune 0 / -12 / +12 cents,
+//       lowpass at 2500Hz, attack 200–500ms
 function buildStrings() {
-  const out = AC.createGain(); out.gain.value = 1;
+  const output = AC.createGain(); output.gain.value = 1;
 
-  // 4 detuned sawtooth oscillators for richness
-  const oscs = [], gains = [];
-  const detunes = [0, 0.15, -0.12, 0.22];
-  const gVals   = [0.35, 0.25, 0.25, 0.15];
-  detunes.forEach((d,i) => {
-    const o = AC.createOscillator(); const g = AC.createGain();
-    o.type='sawtooth'; o.frequency.value=220+d; o.detune.value=d*100;
-    g.gain.value=gVals[i];
-    o.connect(g); oscs.push(o); gains.push(g);
-  });
+  // Spec: exactly 3 sawtooth oscillators, detuned 0, -12, +12 cents
+  const osc1 = AC.createOscillator();
+  const osc2 = AC.createOscillator();
+  const osc3 = AC.createOscillator();
+  osc1.type='sawtooth'; osc1.frequency.value=220; osc1.detune.value=0;
+  osc2.type='sawtooth'; osc2.frequency.value=220; osc2.detune.value=-12;
+  osc3.type='sawtooth'; osc3.frequency.value=220; osc3.detune.value=12;
 
-  // String resonance filters (simulate body resonances)
-  const bp1 = AC.createBiquadFilter(); bp1.type='peaking'; bp1.frequency.value=300;  bp1.Q.value=2; bp1.gain.value=4;
-  const bp2 = AC.createBiquadFilter(); bp2.type='peaking'; bp2.frequency.value=900;  bp2.Q.value=3; bp2.gain.value=3;
-  const bp3 = AC.createBiquadFilter(); bp3.type='peaking'; bp3.frequency.value=2200; bp3.Q.value=4; bp3.gain.value=2;
-  const lp  = AC.createBiquadFilter(); lp.type='lowpass';  lp.frequency.value=4000;  lp.Q.value=0.5;
+  const g1=AC.createGain(), g2=AC.createGain(), g3=AC.createGain();
+  g1.gain.value=0.4; g2.gain.value=0.3; g3.gain.value=0.3;
 
-  // Slow chorus/ensemble effect
-  const cDelay = AC.createDelay(0.04);
-  cDelay.delayTime.value = 0.022;
-  const cMod  = AC.createOscillator(); cMod.frequency.value=0.4; cMod.type='sine';
-  const cModG = AC.createGain(); cModG.gain.value=0.012;
-  cMod.connect(cModG); cModG.connect(cDelay.delayTime);
+  // Spec: lowpass at 2500Hz to remove buzz, make it sound like wood
+  const lp = AC.createBiquadFilter();
+  lp.type            = 'lowpass';
+  lp.frequency.value = 2500;
+  lp.Q.value         = 0.6;
 
-  const merge = AC.createGain(); merge.gain.value=1;
-  gains.forEach(g=>g.connect(merge));
-  merge.connect(bp1); merge.connect(cDelay);
-  cDelay.connect(bp1);
-  bp1.connect(bp2); bp2.connect(bp3); bp3.connect(lp); lp.connect(out);
+  // Slow attack gain envelope — spec: 200–500ms
+  const envGain = AC.createGain();
+  envGain.gain.value = 0;
+  const now = AC.currentTime;
+  envGain.gain.linearRampToValueAtTime(1.0, now + 0.35); // 350ms attack (mid-spec)
 
-  oscs.forEach(o=>o.start()); cMod.start();
+  osc1.connect(g1); osc2.connect(g2); osc3.connect(g3);
+  g1.connect(lp); g2.connect(lp); g3.connect(lp);
+  lp.connect(envGain);
+  envGain.connect(output);
 
+  osc1.start(); osc2.start(); osc3.start();
+
+  let lastFreq = 220;
   return {
-    output: out,
+    output,
     setFreq(f) {
+      if (Math.abs(f - lastFreq) < 0.01) return;
       const t = AC.currentTime;
-      const ds = [0,0.15,-0.12,0.22];
-      oscs.forEach((o,i)=>o.frequency.setTargetAtTime(f+ds[i], t, 0.022));
+      // Spec: setTargetAtTime for continuous sliding
+      [osc1,osc2,osc3].forEach(o=>o.frequency.setTargetAtTime(Math.max(f,1), t, 0.025));
+      lastFreq = f;
     },
-    stop() { [...oscs,cMod].forEach(o=>{try{o.stop();}catch(e){}}) }
+    stop() { [osc1,osc2,osc3].forEach(o=>{try{o.stop();}catch(e){}}) }
   };
 }
 
-// ── VOICE SWITCHER ───────────────────────────────────
+// ─── VOICE 4: CONTINUUM FINGERBOARD ───────────────────
+// Spec: triangle oscillator, Y-axis maps BOTH gain AND filter cutoff simultaneously
+//       setTargetAtTime for frequency (continuous slide)
+function buildContinuum() {
+  const output = AC.createGain(); output.gain.value = 1;
+
+  // Spec: triangle waveform (richer than sine, smoother than saw)
+  const osc = AC.createOscillator();
+  osc.type            = 'triangle';
+  osc.frequency.value = 220;
+
+  // LFO for slight expressiveness
+  const vib  = AC.createOscillator();
+  const vibG = AC.createGain();
+  vib.type            = 'sine';
+  vib.frequency.value = 4.5;
+  vibG.gain.value     = 2;
+  vib.connect(vibG);
+  vibG.connect(osc.frequency);
+
+  // Spec: filter cutoff mapped to volume (Y-axis) — brightness follows loudness
+  // This is the Continuum's defining characteristic
+  const filter = AC.createBiquadFilter();
+  filter.type            = 'lowpass';
+  filter.frequency.value = 800; // starts dark, opens with volume
+  filter.Q.value         = 1.5;
+
+  // Internal gain node — allows per-voice volume control independent of filter mapping
+  const internalGain = AC.createGain();
+  internalGain.gain.value = 0.8;
+
+  osc.connect(filter);
+  filter.connect(internalGain);
+  internalGain.connect(output);
+
+  osc.start(); vib.start();
+
+  let lastFreq=220, lastVol=0;
+  return {
+    output,
+    setFreq(f) {
+      if (Math.abs(f - lastFreq) < 0.01) return;
+      const t = AC.currentTime;
+      // Spec: setTargetAtTime for continuous sliding of the fingerboard
+      osc.frequency.setTargetAtTime(Math.max(f,1), t, 0.012);
+      lastFreq = f;
+    },
+    // Extra method: continuum maps volume to filter brightness simultaneously
+    setVolBrightness(vol) {
+      if (Math.abs(vol - lastVol) < 0.005) return;
+      const t = AC.currentTime;
+      // Spec: map Y-axis to gain AND filter.frequency
+      // Filter: dark at 0 (200Hz) → bright at 1 (4000Hz)
+      const cutoff = 200 + vol * 3800;
+      filter.frequency.setTargetAtTime(cutoff, t, 0.02);
+      lastVol = vol;
+    },
+    stop() { [osc, vib].forEach(o=>{try{o.stop();}catch(e){}}) }
+  };
+}
+
+// ── VOICE REGISTRY ───────────────────────────────────
 const VOICE_BUILDERS = {
   theremin:  buildTheremin,
-  continuum: buildContinuum,
   flute:     buildFlute,
-  strings:   buildStrings
+  strings:   buildStrings,
+  continuum: buildContinuum
 };
-// Reverb amounts per voice
-const REVERB_MIX = { theremin:0.22, continuum:0.14, flute:0.32, strings:0.38 };
-// Smooth speed per voice (lower = slower glide = more expressive)
-const FREQ_SMOOTH = { theremin:0.06, continuum:0.09, flute:0.055, strings:0.035 };
-const VOL_SMOOTH  = { theremin:0.055, continuum:0.065, flute:0.048, strings:0.032 };
-
-let reverbNode=null, reverbSend=null, reverbReturn=null;
+const REVERB_MIX  = { theremin:0.20, flute:0.30, strings:0.35, continuum:0.15 };
+// Volume smoothing time constant per voice (seconds — lower = faster response)
+const VOL_TC      = { theremin:0.04, flute:0.06, strings:0.08, continuum:0.04 };
 
 async function initAudio() {
   AC = new (window.AudioContext||window.webkitAudioContext)();
@@ -788,10 +863,11 @@ async function initAudio() {
   analyser   = AC.createAnalyser(); analyser.fftSize=2048;
   masterGain.connect(analyser); analyser.connect(AC.destination);
 
-  reverbNode   = await makeReverb(2.0, 2.2);
+  reverbNode   = await makeReverb();
   reverbSend   = AC.createGain(); reverbSend.gain.value=REVERB_MIX[currentVoice];
-  reverbReturn = AC.createGain(); reverbReturn.gain.value=0.9;
-  reverbNode.connect(reverbReturn); reverbReturn.connect(masterGain);
+  reverbReturn = AC.createGain(); reverbReturn.gain.value=0.85;
+  reverbNode.connect(reverbReturn);
+  reverbReturn.connect(masterGain);
 
   await switchVoice(currentVoice, false);
   setInterval(audioTick, 16);
@@ -800,29 +876,36 @@ async function initAudio() {
 async function switchVoice(name, crossfade=true) {
   const old = voice;
   if (crossfade && old) {
-    // Fade old out
-    masterGain.gain.setTargetAtTime(0, AC.currentTime, 0.08);
-    await new Promise(r=>setTimeout(r,200));
+    masterGain.gain.setTargetAtTime(0, AC.currentTime, 0.07);
+    await new Promise(r=>setTimeout(r,180));
   }
   if (old) old.stop();
 
   voice = VOICE_BUILDERS[name]();
-
-  // Route: voice.output → masterGain (dry) + reverbSend
   voice.output.connect(masterGain);
   voice.output.connect(reverbSend);
   reverbSend.gain.value = REVERB_MIX[name];
 
-  if (crossfade) masterGain.gain.setTargetAtTime(smoothVol*0.55, AC.currentTime, 0.12);
+  if (crossfade) masterGain.gain.setTargetAtTime(smoothVol*0.55, AC.currentTime, 0.1);
 }
 
 function audioTick() {
   if (!AC || isMuted) return;
-  const fs = FREQ_SMOOTH[currentVoice], vs = VOL_SMOOTH[currentVoice];
-  smoothFreq += (targetFreq - smoothFreq)*fs;
-  smoothVol  += (targetVol  - smoothVol) *vs;
-  masterGain.gain.setTargetAtTime(smoothVol*0.55, AC.currentTime, 0.008);
-  if (voice) voice.setFreq(smoothFreq);
+
+  // Smooth volume — use per-voice time constant
+  const vtc = VOL_TC[currentVoice] || 0.05;
+  smoothVol += (targetVol - smoothVol) * (1 - Math.exp(-16 * vtc / 1000 * 60));
+
+  // Apply to master
+  masterGain.gain.setTargetAtTime(smoothVol * 0.55, AC.currentTime, 0.005);
+
+  // Continuum: also update filter brightness from volume
+  if (voice && currentVoice === 'continuum' && voice.setVolBrightness) {
+    voice.setVolBrightness(smoothVol);
+  }
+
+  // Frequency: push directly into voice — each voice handles its own glide
+  if (voice) voice.setFreq(targetFreq);
 }
 
 function setSound(name) {
