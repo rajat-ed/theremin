@@ -789,11 +789,7 @@ let volPos = null, pitchPos = null;
 let prevPosL = null, prevPosR = null;
 let drumCooldowns = {};
 
-function initHands() {
-  hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
-  hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.55 });
-  hands.onResults(onHands);
-}
+// hands initialized inline in startApp()
 
 function onHands(R) {
   if (!R.multiHandLandmarks) return;
@@ -1039,7 +1035,6 @@ async function startApp() {
   document.getElementById('setup').style.display = 'none';
   document.getElementById('app').style.display = 'block';
 
-  // Update side labels
   const vS = assignment.left === 'volume' ? 'LEFT' : 'RIGHT';
   const pS = assignment.left === 'pitch'  ? 'LEFT' : 'RIGHT';
   document.getElementById('pVolHint').textContent   = vS + ' ↕';
@@ -1047,46 +1042,65 @@ async function startApp() {
   document.getElementById('pdotVLbl').textContent   = vS.toLowerCase() + ' (vol)';
   document.getElementById('pdotPLbl').textContent   = pS.toLowerCase() + ' (pitch)';
 
-  // Canvases
-  waveCvs = document.getElementById('waveCanvas');
-  waveCtx2 = waveCvs.getContext('2d');
-  drumCvs = document.getElementById('drumCvs');
-  drumCtx = drumCvs.getContext('2d');
-  confCvs = document.getElementById('confettiCvs');
-  confCtx = confCvs.getContext('2d');
+  waveCvs  = document.getElementById('waveCanvas');  waveCtx2 = waveCvs.getContext('2d');
+  drumCvs  = document.getElementById('drumCvs');      drumCtx  = drumCvs.getContext('2d');
+  confCvs  = document.getElementById('confettiCvs'); confCtx  = confCvs.getContext('2d');
 
   const resize = () => {
-    [document.getElementById('trailCvs'), document.getElementById('overlayCvs'),
-     drumCvs, confCvs].forEach(c => { if(c){c.width=window.innerWidth;c.height=window.innerHeight;} });
-    if (waveCvs) { waveCvs.width = waveCvs.offsetWidth; waveCvs.height = waveCvs.offsetHeight; }
-    drawDrumKit();
-    buildDrumLabels();
+    [document.getElementById('trailCvs'), document.getElementById('overlayCvs'), drumCvs, confCvs]
+      .forEach(c => { if(c){ c.width=window.innerWidth; c.height=window.innerHeight; }});
+    if (waveCvs) { waveCvs.width=waveCvs.offsetWidth; waveCvs.height=waveCvs.offsetHeight; }
+    drawDrumKit(); buildDrumLabels();
   };
   window.addEventListener('resize', resize);
   resize();
 
+  // AudioContext — created on user gesture so it starts in running state
   initAudio();
-  initHands();
-  buildNoteZones();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
 
-  // Default to play mode
+  buildNoteZones();
   setMode('play');
 
+  const statusEl = document.getElementById('statusMsg');
+  statusEl.textContent = 'LOADING HAND MODEL...';
+  statusEl.style.opacity = '1';
+
   const vid = document.getElementById('vid');
+
   try {
+    // Step 1: get raw camera stream and attach to video element
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width:{ideal:1280}, height:{ideal:720}, facingMode:'user' }, audio: false
+      video: { width:{ideal:1280}, height:{ideal:720}, facingMode:'user' },
+      audio: false
     });
     vid.srcObject = stream;
-    await new Promise(r => vid.onloadedmetadata = r);
-    vid.play();
+    await new Promise((res, rej) => { vid.onloadedmetadata = res; vid.onerror = rej; });
+    await vid.play();
+
+    statusEl.textContent = 'INITIALIZING MEDIAPIPE...';
+
+    // Step 2: create and configure Hands — do NOT use the Camera helper yet
+    hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+    hands.setOptions({ maxNumHands:2, modelComplexity:1, minDetectionConfidence:0.6, minTrackingConfidence:0.55 });
+    hands.onResults(onHands);
+
+    // Step 3: send one priming frame so model weights download before the loop starts
+    await hands.send({ image: vid });
+
+    statusEl.textContent = 'RAISE BOTH HANDS';
+
+    // Step 4: now start Camera loop (it reuses the same srcObject stream)
     mpCamera = new Camera(vid, {
-      onFrame: async () => { if (hands) await hands.send({ image: vid }); },
+      onFrame: async () => { try { await hands.send({ image: vid }); } catch(e){} },
       width: 1280, height: 720
     });
     mpCamera.start();
+
   } catch(e) {
-    document.getElementById('statusMsg').textContent = 'CAMERA ERROR: ' + e.message;
+    console.error(e);
+    statusEl.textContent = 'ERROR: ' + (e.message || String(e));
+    statusEl.style.opacity = '1';
   }
 
   drawWave();
