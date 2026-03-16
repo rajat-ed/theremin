@@ -304,6 +304,30 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #000; colo
 .hs-dot { width: 7px; height: 7px; border-radius: 50%; background: rgba(255,255,255,.2); transition: all .2s; }
 .hs-item.active .hs-dot { background: #fff; box-shadow: 0 0 6px rgba(255,255,255,.6); }
 
+/* ── SCALE SELECTOR ── */
+.scale-group {
+  display: flex; gap: 4px; align-items: center; pointer-events: all;
+}
+.scale-label {
+  font-family: 'DM Mono', monospace; font-size: .55rem;
+  letter-spacing: 2px; color: rgba(255,255,255,.25);
+  text-transform: uppercase; margin-right: 6px;
+}
+.scale-btn {
+  background: transparent;
+  border: 1px solid rgba(255,255,255,.15);
+  color: rgba(255,255,255,.35);
+  font-family: 'DM Mono', monospace; font-size: .58rem;
+  letter-spacing: 1.5px; padding: 5px 13px; border-radius: 2px;
+  cursor: pointer; transition: all .18s; text-transform: uppercase;
+  backdrop-filter: blur(4px);
+}
+.scale-btn:hover { border-color: rgba(255,255,255,.4); color: rgba(255,255,255,.7); }
+.scale-btn.active {
+  border-color: rgba(255,255,255,.7); color: #fff;
+  background: rgba(255,255,255,.08);
+}
+
 /* ── LOADING OVERLAY ── */
 #loader {
   position: fixed; inset: 0; z-index: 300;
@@ -504,6 +528,12 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #000; colo
   <!-- Bottom bar -->
   <div id="bottomBar">
     <div id="waveWrap"><canvas id="waveCanvas"></canvas></div>
+    <div class="scale-group">
+      <span class="scale-label">Scale</span>
+      <button class="scale-btn" id="sc-chromatic" onclick="setScale('chromatic')">Chromatic</button>
+      <button class="scale-btn active" id="sc-major" onclick="setScale('major')">Major</button>
+      <button class="scale-btn" id="sc-minor" onclick="setScale('minor')">Minor</button>
+    </div>
     <div class="hand-status">
       <div class="hs-item" id="hsVol">
         <div class="hs-dot"></div><span id="hsVolLbl">Vol hand</span>
@@ -679,7 +709,14 @@ async function initAudio() {
 // Scale: chromatic by default, maps X position to note
 const CHROMATIC = [0,1,2,3,4,5,6,7,8,9,10,11];
 const MAJOR     = [0,2,4,5,7,9,11];
+const MINOR     = [0,2,3,5,7,8,10];
 let   useScale  = MAJOR; // major scale feels musical out of the box
+
+function setScale(name) {
+  useScale = name === 'chromatic' ? CHROMATIC : name === 'minor' ? MINOR : MAJOR;
+  document.querySelectorAll('.scale-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('sc-' + name).classList.add('active');
+}
 
 function xNormToFreq(xNorm) {
   // Map 0..1 across 3 octaves of the major scale (C3 to C6 range)
