@@ -144,6 +144,14 @@ body{
   width:1px;height:16px;background:rgba(255,255,255,.12);
   flex-shrink:0;margin:0 4px;
 }
+.tb-row-label{
+  font-family:'DM Mono',monospace;font-size:.48rem;
+  letter-spacing:2.5px;color:rgba(255,255,255,.25);
+  text-transform:uppercase;flex-shrink:0;
+  align-self:center;margin-right:4px;
+  text-shadow:0 1px 4px rgba(0,0,0,.8);
+  white-space:nowrap;
+}
 
 /* ── ALL BUTTONS — shared base ── */
 .sc-btn,.snd-btn,.u-btn{
@@ -256,14 +264,14 @@ body{
 .hcur{position:absolute;z-index:15;pointer-events:none;transform:translate(-50%,-50%);display:none;}
 .hcur.show{display:block;}
 .hcur-ring{
-  width:clamp(38px,6vmin,50px);height:clamp(38px,6vmin,50px);
-  border-radius:50%;border:1.5px solid rgba(255,255,255,.65);
+  width:clamp(28px,4vmin,38px);height:clamp(28px,4vmin,38px);
+  border-radius:50%;border:1.5px solid rgba(255,255,255,.7);
   display:flex;align-items:center;justify-content:center;
-  transition:transform .06s;
-  box-shadow:0 0 16px rgba(255,255,255,.15);
+  transition:transform .04s;
+  box-shadow:0 0 12px rgba(255,255,255,.2), 0 0 4px rgba(255,255,255,.4);
 }
-.hcur-dot{width:6px;height:6px;border-radius:50%;background:#fff;box-shadow:0 0 8px rgba(255,255,255,.8);}
-#curVol .hcur-ring{width:clamp(46px,7vmin,58px);height:clamp(46px,7vmin,58px);}
+.hcur-dot{width:4px;height:4px;border-radius:50%;background:#fff;box-shadow:0 0 6px rgba(255,255,255,.9);}
+#curVol .hcur-ring{width:clamp(36px,5vmin,46px);height:clamp(36px,5vmin,46px);}
 
 /* ══════════════════════════
    THEREMIN GRAPHIC
@@ -397,7 +405,7 @@ body{
   <div class="hcur" id="curVol"><div class="hcur-ring"><div class="hcur-dot"></div></div></div>
   <div class="hcur" id="curPitch"><div class="hcur-ring"><div class="hcur-dot"></div></div></div>
 
-  <!-- TOP BAR — two rows, scrollable on small screens -->
+  <!-- TOP BAR — three rows, scrollable on small screens -->
   <div id="topBar">
     <!-- Row 1: brand + utility -->
     <div class="tb-row1">
@@ -408,12 +416,16 @@ body{
         <button class="u-btn" onclick="goSetup()">← Back</button>
       </div>
     </div>
-    <!-- Row 2: scale + sound (horizontally scrollable on phones) -->
+    <!-- Row 2: scale options -->
     <div class="tb-row2">
+      <span class="tb-row-label">Scale</span>
       <button class="sc-btn" id="sc-chromatic" onclick="setScale('chromatic')">Chromatic</button>
       <button class="sc-btn on" id="sc-major"  onclick="setScale('major')">Major</button>
       <button class="sc-btn" id="sc-minor"     onclick="setScale('minor')">Minor</button>
-      <div class="tb-sep"></div>
+    </div>
+    <!-- Row 3: instrument options -->
+    <div class="tb-row2">
+      <span class="tb-row-label">Sound</span>
       <button class="snd-btn on" id="snd-theremin"  onclick="setSound('theremin')">Theremin</button>
       <button class="snd-btn"    id="snd-continuum" onclick="setSound('continuum')">Continuum</button>
       <button class="snd-btn"    id="snd-flute"     onclick="setSound('flute')">Flute</button>
@@ -938,67 +950,127 @@ function drawWave() {
   waveCtx.lineWidth=1.5; waveCtx.stroke();
 }
 
-// ── HAND TRACKING — MediaPipe Holistic ───────────────
-// Using Holistic for full-body pose + hands — wrist from POSE landmarks
-// is much more stable than Hands-only because pose has full body context
+// ── HAND TRACKING — MediaPipe Holistic, fingertip precision ──
+// MediaPipe Holistic gives us:
+//   leftHandLandmarks  — 21 points, person's LEFT hand
+//   rightHandLandmarks — 21 points, person's RIGHT hand
+//   poseLandmarks      — 33 points, full body (used as fallback)
+//
+// Landmark indices (per hand):
+//   0  = wrist
+//   4  = thumb tip
+//   8  = index finger tip  ← PRIMARY for pitch (most expressive)
+//   12 = middle finger tip
+//   16 = ring finger tip
+//   20 = pinky tip
+//
+// VOLUME hand  → we use index fingertip Y position (up/down)
+// PITCH hand   → we use index fingertip X position (left/right)
+// Both use landmark 8 (index tip) for maximum precision.
+// Fallback: if hand landmarks unavailable, use pose wrist (landmark 15/16).
+
 let holistic, mpCamera;
 let volPos=null, pitchPos=null;
 
-// Use POSE landmarks for wrist positions (more stable)
-// 15 = left wrist, 16 = right wrist in MediaPipe Pose (33 landmarks)
-// We also get hand refinement data from holistic
+// Track last fingertip positions for smooth trail
+const IDX_TIP = 8; // index fingertip
+
+function getFingerPos(handLandmarks) {
+  // Primary: index fingertip (landmark 8) — highest precision
+  if (!handLandmarks) return null;
+  const tip = handLandmarks[IDX_TIP];
+  if (!tip) return null;
+  return { x: tip.x, y: tip.y };
+}
+
 function onHolistic(results) {
   const vid = document.getElementById('vid');
   const W = vid.offsetWidth  || window.innerWidth;
   const H = vid.offsetHeight || window.innerHeight;
 
-  volPos=null; pitchPos=null;
+  volPos = null;
+  pitchPos = null;
 
-  // Trail canvas fade — destination-out removes alpha, never paints black
+  // Fade trail — destination-out compositing so it fades to transparent, never black
   const tCvs = document.getElementById('trailCvs');
   const tCtx = tCvs.getContext('2d');
-  tCtx.globalCompositeOperation='destination-out';
-  tCtx.fillStyle='rgba(0,0,0,0.18)';
-  tCtx.fillRect(0,0,tCvs.width,tCvs.height);
-  tCtx.globalCompositeOperation='source-over';
+  tCtx.globalCompositeOperation = 'destination-out';
+  tCtx.fillStyle = 'rgba(0,0,0,0.22)';
+  tCtx.fillRect(0, 0, tCvs.width, tCvs.height);
+  tCtx.globalCompositeOperation = 'source-over';
 
-  // Primary: use POSE wrist landmarks — holistic gives these stably even when
-  // hand details are occluded. Pose landmark 15 = LEFT wrist, 16 = RIGHT wrist
-  // (in Holistic, pose landmarks are NOT mirrored — they match actual body sides)
-  if (results.poseLandmarks) {
-    const lw = results.poseLandmarks[15]; // left wrist
-    const rw = results.poseLandmarks[16]; // right wrist
+  // ── PRIMARY: fingertip from hand landmarks ──────────
+  // Holistic hand landmark naming: leftHandLandmarks = person's LEFT hand (feed is mirrored)
+  const lh = results.leftHandLandmarks;   // person's left hand
+  const rh = results.rightHandLandmarks;  // person's right hand
 
-    // Holistic pose: x/y are 0..1, x increases left→right in image (mirrored feed)
-    if (lw && lw.visibility > 0.5) {
-      const pos = { x: lw.x, y: lw.y };
-      if (assignment.left==='volume')  volPos   = pos;
-      if (assignment.left==='pitch')   pitchPos = pos;
-      // Trail dot
-      tCtx.beginPath(); tCtx.arc((1-lw.x)*W, lw.y*H, 5, 0, Math.PI*2);
-      tCtx.fillStyle='rgba(255,255,255,.4)'; tCtx.fill();
-    }
-    if (rw && rw.visibility > 0.5) {
-      const pos = { x: rw.x, y: rw.y };
-      if (assignment.right==='volume') volPos   = pos;
-      if (assignment.right==='pitch')  pitchPos = pos;
-      tCtx.beginPath(); tCtx.arc((1-rw.x)*W, rw.y*H, 5, 0, Math.PI*2);
-      tCtx.fillStyle='rgba(255,255,255,.3)'; tCtx.fill();
-    }
+  const leftFingerPos  = getFingerPos(lh);
+  const rightFingerPos = getFingerPos(rh);
+
+  if (leftFingerPos) {
+    if (assignment.left === 'volume') volPos   = leftFingerPos;
+    else                              pitchPos = leftFingerPos;
+
+    // Draw precise fingertip trail dot
+    const sx = (1 - leftFingerPos.x) * W;
+    const sy = leftFingerPos.y * H;
+    tCtx.beginPath(); tCtx.arc(sx, sy, 3, 0, Math.PI*2);
+    tCtx.fillStyle = 'rgba(255,255,255,.6)'; tCtx.fill();
+
+    // Also draw all 5 fingertips as tiny satellite dots for visual richness
+    [4,8,12,16,20].forEach(idx => {
+      const tip = lh[idx];
+      if (!tip) return;
+      tCtx.beginPath();
+      tCtx.arc((1-tip.x)*W, tip.y*H, idx===8 ? 3.5 : 1.8, 0, Math.PI*2);
+      tCtx.fillStyle = idx===8 ? 'rgba(255,255,255,.55)' : 'rgba(255,255,255,.2)';
+      tCtx.fill();
+    });
   }
 
-  // Fallback: if pose wrists not visible, use raw hand landmarks
-  // leftHandLandmarks = person's LEFT hand (holistic naming matches body side)
-  if (!volPos && !pitchPos) {
-    const lh = results.leftHandLandmarks;
-    const rh = results.rightHandLandmarks;
-    if (lh) {
-      const pos={x:lh[0].x, y:lh[0].y};
-      if(assignment.left==='volume') volPos=pos; else pitchPos=pos;
-    }
-    if (rh) {
-      const pos={x:rh[0].x, y:rh[0].y};
-      if(assignment.right==='volume') volPos=pos; else pitchPos=pos;
+  if (rightFingerPos) {
+    if (assignment.right === 'volume') volPos   = rightFingerPos;
+    else                               pitchPos = rightFingerPos;
+
+    const sx = (1 - rightFingerPos.x) * W;
+    const sy = rightFingerPos.y * H;
+    tCtx.beginPath(); tCtx.arc(sx, sy, 3, 0, Math.PI*2);
+    tCtx.fillStyle = 'rgba(255,255,255,.5)'; tCtx.fill();
+
+    [4,8,12,16,20].forEach(idx => {
+      const tip = rh[idx];
+      if (!tip) return;
+      tCtx.beginPath();
+      tCtx.arc((1-tip.x)*W, tip.y*H, idx===8 ? 3.5 : 1.8, 0, Math.PI*2);
+      tCtx.fillStyle = idx===8 ? 'rgba(255,255,255,.5)' : 'rgba(255,255,255,.18)';
+      tCtx.fill();
+    });
+  }
+
+  // ── FALLBACK: pose wrist landmarks ──────────────────
+  // Used only when hand landmarks are not detected (hand partially out of frame etc.)
+  if (!volPos || !pitchPos) {
+    if (results.poseLandmarks) {
+      const lw = results.poseLandmarks[15]; // LEFT wrist in pose
+      const rw = results.poseLandmarks[16]; // RIGHT wrist in pose
+
+      if (!volPos && lw && lw.visibility > 0.55) {
+        const pos = { x: lw.x, y: lw.y };
+        if (assignment.left === 'volume') volPos   = pos;
+        else if (!pitchPos)               pitchPos = pos;
+        // Wrist fallback indicator — larger hollow dot
+        tCtx.beginPath();
+        tCtx.arc((1-lw.x)*W, lw.y*H, 6, 0, Math.PI*2);
+        tCtx.strokeStyle = 'rgba(255,255,255,.25)'; tCtx.lineWidth=1; tCtx.stroke();
+      }
+      if (!pitchPos && rw && rw.visibility > 0.55) {
+        const pos = { x: rw.x, y: rw.y };
+        if (assignment.right === 'pitch') pitchPos = pos;
+        else if (!volPos)                 volPos   = pos;
+        tCtx.beginPath();
+        tCtx.arc((1-rw.x)*W, rw.y*H, 6, 0, Math.PI*2);
+        tCtx.strokeStyle = 'rgba(255,255,255,.2)'; tCtx.lineWidth=1; tCtx.stroke();
+      }
     }
   }
 
@@ -1150,12 +1222,13 @@ async function launch() {
     // 2. Init MediaPipe Holistic
     holistic=new Holistic({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${f}`});
     holistic.setOptions({
-      modelComplexity:1,
-      smoothLandmarks:true,
-      enableSegmentation:false,
-      refineFaceLandmarks:false,
-      minDetectionConfidence:0.6,
-      minTrackingConfidence:0.55
+      modelComplexity: 2,          // Highest precision model
+      smoothLandmarks: true,       // Temporal smoothing — reduces jitter
+      enableSegmentation: false,
+      smoothSegmentation: false,
+      refineFaceLandmarks: false,  // Not needed, saves compute for hand precision
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6   // Higher = more stable tracking
     });
     holistic.onResults(onHolistic);
 
