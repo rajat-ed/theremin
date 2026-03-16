@@ -106,7 +106,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #000; colo
   object-fit: cover;
   transform: scaleX(-1);
   /* Desaturated so the UI overlay reads cleanly, but still fully visible */
-  filter: saturate(0) brightness(0.72) contrast(1.05);
+  filter: none;
   transition: opacity .4s;
 }
 #vid.off { opacity: 0; }
@@ -114,7 +114,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #000; colo
 /* Dark vignette to keep edges readable */
 #vignette {
   position: absolute; inset: 0; z-index: 1; pointer-events: none;
-  background: radial-gradient(ellipse at center, transparent 30%, rgba(0,0,0,.55) 100%);
+  background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,.3) 100%);
 }
 
 /* Trail canvas — hand trails */
@@ -128,7 +128,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #000; colo
   position: absolute; top: 0; left: 0; right: 0; z-index: 20;
   display: flex; align-items: center; justify-content: space-between;
   padding: 16px 22px;
-  background: linear-gradient(to bottom, rgba(0,0,0,.75), transparent);
+  background: linear-gradient(to bottom, rgba(0,0,0,.65) 0%, transparent 100%);
 }
 .t-brand {
   font-size: 1.1rem; font-weight: 600; letter-spacing: .3px;
@@ -281,7 +281,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #000; colo
 #bottomBar {
   position: absolute; bottom: 0; left: 0; right: 0; z-index: 10;
   padding: 12px 22px 18px;
-  background: linear-gradient(to top, rgba(0,0,0,.75), transparent);
+  background: linear-gradient(to top, rgba(0,0,0,.65) 0%, transparent 100%);
   display: flex; align-items: flex-end; justify-content: space-between;
   pointer-events: none;
 }
